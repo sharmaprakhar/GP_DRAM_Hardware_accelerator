@@ -50,8 +50,14 @@ reg 	[3:0]				mainFSM_currentState;
 reg		[3:0]				mainFSM_prevState; 
 
 reg axiSlaveStream_weightsReceived_to_BRAM1; //raw weights from floating point
-reg startFirstBin;
+reg temp_var_weight;
 
+/////////////////////////////////////
+// counters for bins - 9 bits each
+/////////////////////////////////////	   
+
+bramCounterArray[511:0][8:0] //to count number of weights stored in the BRAM bins
+dramCounterArray[511:0][8:0] //to count number of weights stored in the DRAM bins
 
 always @(posedge Clk)
        if ( ! ResetL ) begin 
@@ -72,40 +78,17 @@ always @(posedge Clk)
 		     end
 		     ComputationDone <= 0; 
 	      end 
+		  
+///////////////////////////////////////////////////////////////////
+// stream data transfer from weight generator to first BRAM memory
+///////////////////////////////////////////////////////////////////
 	      `FSM_RECEIEVE_RAW_WEIGHTS_BRAM1: begin 
+		    axis_slave_ready  <= 1; 
 			if ( axiSlaveStream_weightsReceived_to_BRAM1 ) begin  
 				mainFSM_currentState <= `FSM_COMPUTE_BINS_BLOCK; //FSM_COMPUTE_BLOCK
 				mainFSM_prevState <= `FSM_RECEIEVE_RAW_WEIGHTS_BRAM1;
 			end 
-			else begin 
-				mainFSM_currentState <= `FSM_RECEIEVE_RAW_WEIGHTS_BRAM1;
-				mainFSM_prevState <= `FSM_RECEIEVE_RAW_WEIGHTS_BRAM1;
-			end 
-	      end 
-              `FSM_COMPUTE_BINS_BLOCK: begin
-                        if ( onebinfull ) begin
-						mainFSM_currentState = `FSM_SEND_ONE_FULL_BIN; //`FSM_SEND_BLOCK_BRAM2;
-						mainFSM_prevState    <= `FSM_COMPUTE_BINS_BLOCK;
-						end
-						if ( ComputeDone ) begin
-                                mainFSM_currentState <= `FSM_SEND_ALL_BINS; //`FSM_SEND_BLOCK_BRAM2;
-                                mainFSM_prevState    <= `FSM_COMPUTE_BINS_BLOCK;
-                                
-                        end
-                        else begin
-                                mainFSM_currentState <= `FSM_COMPUTE_BINS_BLOCK;
-                                mainFSM_prevState    <= `FSM_COMPUTE_BINS_BLOCK;
-                        end
-
-              end
-	      
-///////////////////////////////////////////////////////////////////
-// stream data transfer from weight generator to first BRAM memory
-///////////////////////////////////////////////////////////////////
-		   `FSM_RECEIEVE_RAW_WEIGHTS_BRAM1: 
-		   begin
-						axis_slave_ready  <= 1; 
-                        //if (axistream_data_receive_count == (`NumofpixelsperBlock - 1) ) hack to make it work need to change back to original
+			//if (axistream_data_receive_count == (`NumofpixelsperBlock - 1) ) hack to make it work need to change back to original
                         if (axistream_data_receive_count == (`NumofweightssperBlock) ) //should be 160*160*4
                         begin                            
 			                    mainFSM_currentState          	<= `FSM_COMPUTE_BINS_BLOCK; 
@@ -130,18 +113,64 @@ always @(posedge Clk)
                                 	axistream_data_receive_count   <= axistream_data_receive_count;
 				                end                                 
                         end    
-            end
+			else begin 
+				mainFSM_currentState <= `FSM_RECEIEVE_RAW_WEIGHTS_BRAM1;
+				mainFSM_prevState <= `FSM_RECEIEVE_RAW_WEIGHTS_BRAM1;
+			end 
+	        end 
+			
+			
+              `FSM_COMPUTE_BINS_BLOCK: begin
+                        if ( onebinfull ) begin
+						mainFSM_currentState <= `FSM_SEND_ONE_FULL_BIN; //`FSM_SEND_BLOCK_BRAM2;
+						mainFSM_prevState    <= `FSM_COMPUTE_BINS_BLOCK;
+						//remember to get the mainFSM state back to FSM_COMPUTE_BINS_BLOCK from FSM_SEND_ONE_FULL_BIN if ComputeDone = 0
+						end
+						if ( ComputeDone ) begins
+                                mainFSM_currentState <= `FSM_SEND_ALL_BINS; //`FSM_SEND_BLOCK_BRAM2;
+                                mainFSM_prevState    <= `FSM_COMPUTE_BINS_BLOCK;
+                                
+                        end
+                        else 
+						begin
+							if (rawWeightBinCount < NumofpixelsperBlock) 
+							begin
+								temp_var_weight <= pixelbram_readData_0;
+								if ( temp_var_weight[12:11] = 2b'0 )
+								begin
+									if ( temp_var_weight[12:10] = 3b'0 )
+									begin
+											if ( temp_var_weight[12:10] = 4b'0 )
+											begin
+											//set pixelbram_writeAddress_1 to bramCounterArray value
+											//set bramCounterArray = bramCounterArray + 1
+											//check if bramCounterArray = (NumofWeightsPerBin-1), raise onebinfull and update 'which bin' value to be passed to DRAM transfer state FSM_SEND_ONE_FULL_BIN
+											//send to pixelbram_writeData_1 - bins corresponding to 
+											end
+											else begin 
+											//send to bins corresponding to 000
+											end
+									end
+									else begin
+									//send to bins correspondingto 00
+									end
+								end
+								else begin
+								//send to bins corresponding to 0
+								end
+							
+							end
+						end
+						else begin
+							ComputeDone <= 1;
+						end
+							pixelbram_readAddress_0 <= pixelbram_readAddress_0 + 1; 
+                end
 
-			`FSM_COMPUTE_BINS_BLOCK: 
-			begin
-				if () 
-			
-			
-			
-			
-			end
-		   
-		   
+              
+	      
+
+  
 		   `FSM_SEND_ALL_BINS: begin
 	        //ComputeDone <= 1'b0;
  			if ( axiMaster_allBinsSent_to_DRAM ) begin
@@ -173,12 +202,7 @@ always @(posedge Clk)
        end 
 
 	   
-/////////////////////////////////////
-// counters for bins - 9 bits each
-/////////////////////////////////////	   
 
-bramCounterArray[511:0][8:0] //to count number of weights stored in the BRAM bins
-dramCounterArray[511:0][8:0] //to count number of weights stored in the DRAM bins
 
 
 //////////////////////////////////////////////////////
@@ -448,8 +472,9 @@ reg		[3:0]			pixelbram_readDataSelect;			// doesnt matter
 reg				        pixelbram_readDataOrder; 			// doesnt matter 
 reg 	[1:0]			pixelbram_readAddress_subCounter; 		// doesnt matter 
 
-assign pixelbram_writeEnable_0  = ( ( /*write an axi fsm state here*/ ) && (axis_slave_ready) && (axis_slave_valid) );
-//assign pixelbram_writeEn       = ( ( mainFSM_currentState = `FSM_RECEIEVE_RAW_WEIGHTS_BRAM1 ) && (axis_slave_ready) && (axis_slave_valid) );
+assign pixelbram_writeEnable_0  = ( ( mainFSM_currentState == `FSM_RECEIEVE_BLOCK_BRAM1 ) && (axis_slave_ready) && (axis_slave_valid) );
+assign pixelbram_readEnable_0  = ( ( mainFSM_currentState == `FSM_COMPUTE_BINS_BLOCK ) && ( !onebinfull ) && ( !ComputeDone ) );
+assign pixelbram_writeEnable_1       = ( ( mainFSM_currentState = `FSM_COMPUTE_BINS_BLOCK ) && ( !onebinfull ) && ( !ComputeDone ) );
 
 
 blk_mem_gen_0 pixel_buffer_blk_mem_Ins0 (
@@ -515,12 +540,11 @@ always @(posedge Clk)
 	end 
 	
 
-/* will come under compute bins
-//////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////
 // 
-// input data to slave stream interface 
+// input data to bins BRAM - used in the compute bins block
 //
-//////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////
 always @(posedge Clk)
 	if ( ! ResetL ) begin 
 		pixelbram_writeAddress_1 <= 0; 
@@ -528,16 +552,17 @@ always @(posedge Clk)
 		pixelbram_writeEnable_1  <= 0;
 	end 
 	else begin 
-		if ( axiFSM_currentState == `AXI_FSM_IDLE ) 
+		if ( mainFSM_currentState == `FSM_IDLE ) 
 		begin 
-			//pixelbram_writeAddress_1  <= 0; 
+			pixelbram_writeAddress_1  <= 0; 
 			pixelbram_writeData_1     <= 0; 
 			pixelbram_writeEnable_1   <= 0;
 		end
-                else if ( pixelbram_writeEn ) 
+                else if ( pixelbram_writeEnable_1 ) //write conditions for writing
                 begin
                 	    //pixelbram_writeAddress_1       <= pixelbram_writeAddress_1 + axistream_data_receive_count;
-                	    pixelbram_writeEnable_1        <= 1'b1;
+                	    //pixelbram_writeEnable_1        <= 1'b1;
+						
                 	    pixelbram_writeAddress_1       <= axistream_data_receive_count;
                         pixelbram_writeData_1          <= axis_slave_data_in;
                         end
@@ -547,7 +572,7 @@ always @(posedge Clk)
                         pixelbram_writeData_1         <= 0;
                         pixelbram_writeEnable_1        <= 1'b0;
                 end
-             end 	 */
+             end 	 
 			 
 			 
 ////////////////////////////////////////////////////////////////////////////////			 
