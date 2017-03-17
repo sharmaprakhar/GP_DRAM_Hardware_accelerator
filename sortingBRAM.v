@@ -48,6 +48,8 @@ localparam BE_WIDTH = (PIXEL_WIDTH)/8;
 
 reg 	[3:0]				mainFSM_currentState; 
 reg		[3:0]				mainFSM_prevState; 
+reg		[10:0]				currentWeight;
+reg		[31:0]				binNumber
 
 reg axiSlaveStream_weightsReceived_to_BRAM1; //raw weights from floating point
 reg temp_var_weight;
@@ -126,7 +128,7 @@ always @(posedge Clk)
 						mainFSM_prevState    <= `FSM_COMPUTE_BINS_BLOCK;
 						//remember to get the mainFSM state back to FSM_COMPUTE_BINS_BLOCK from FSM_SEND_ONE_FULL_BIN if ComputeDone = 0
 						end
-						if ( ComputeDone ) begins
+						if ( ComputeDone ) begin
                                 mainFSM_currentState <= `FSM_SEND_ALL_BINS; //`FSM_SEND_BLOCK_BRAM2;
                                 mainFSM_prevState    <= `FSM_COMPUTE_BINS_BLOCK;
                                 
@@ -142,9 +144,14 @@ always @(posedge Clk)
 									begin
 											if ( temp_var_weight[12:10] = 4b'0 )
 											begin
-											//set pixelbram_writeAddress_1 to bramCounterArray value
-											//set bramCounterArray = bramCounterArray + 1
-											//check if bramCounterArray = (NumofWeightsPerBin-1), raise onebinfull and update 'which bin' value to be passed to DRAM transfer state FSM_SEND_ONE_FULL_BIN
+											currentWeight = pixelbram_readData_0; //calculate bin number 
+											binNumber = currentWeight*4;
+											bramCounterArray[binNumber] <= bramCounterArray[binNumber] + 1; //increase counter for that bin
+											//check if bramCounterArray = (NumofWeightsPerBin-1), raise onebinfull 
+												if (bramCounterArray[binNumber] == (NumofWeightsPerBin-1) )
+												begin
+													onebinfull <= onebinfull + 1;
+												end
 											//send to pixelbram_writeData_1 - bins corresponding to 
 											end
 											else begin 
@@ -169,10 +176,24 @@ always @(posedge Clk)
 
               
 	      
-
+			`FSM_SEND_ONE_FULL_BIN: begin
+				if ( !onebinfull )
+				begin
+					mainFSM_currentState <= `FSM_COMPUTE_BINS_BLOCK;
+					mainFSM_prevState <= `FSM_SEND_ONE_FULL_BIN;
+				end
+				if ( onebinfullSent )//basically the bin that was full has been sent
+				begin
+					onebinfull <= 0;
+				end
+				else begin
+					mainFSM_currentState <= `FSM_SEND_ONE_FULL_BIN;
+					mainFSM_prevState <= `FSM_SEND_ONE_FULL_BIN;
+				end
+			end
   
 		   `FSM_SEND_ALL_BINS: begin
-	        //ComputeDone <= 1'b0;
+	        //ComputeDone <= 1'b0; // ALSO - REBINNING !!!
  			if ( axiMaster_allBinsSent_to_DRAM ) begin
 				//if ( ( sendBlockCounter == (NumberOfBlocks-1) )  ) begin 
 					mainFSM_currentState <= `FSM_END_OPERATION;
@@ -209,7 +230,7 @@ always @(posedge Clk)
 // axi master - constant signals (fixed value)
 //////////////////////////////////////////////////////
 
-assign ip2bus_mst_length = //dynamic for every send - depends on the  bram and dram counter arrays
+//assign ip2bus_mst_length = //dynamic for every send - depends on the  bram and dram counter arrays
 assign ip2bus_mst_type = 1; // we always transfer in bursts. 
 assign ip2bus_mst_lock = 0; 
 assign ip2bus_mstrd_dst_dsc_n = 1; 	// we do never discountinue a transfer (master read destination ready) 
@@ -226,7 +247,7 @@ assign ip2bus_mstwr_src_dsc_n = 1;
 // logic to talk to the axi master ipif
 
 //reg 			axiMaster_blockReceived_to_BRAM1;
-//reg 			axiMaster_blockSent_to_BRAM2; 
+reg 			axiMaster_binSent_to_DRAM; 
 reg 			ComputeDone; 
 reg	[3:0]		axiFSM_currentState; 
 reg	[3:0]		axiFSM_prevState; 
@@ -240,7 +261,7 @@ always @(posedge Clk)
 		axiFSM_currentState <= `AXI_FSM_IDLE; 
 		axiFSM_prevState <= `AXI_FSM_IDLE;
 		axiMaster_blockReceived_to_BRAM1 <= 0; 
-		axiMaster_blockSent_to_BRAM2 <= 0; 
+		axiMaster_binSent_to_DRAM <= 0; 
 		ip2bus_mstrd_req <= 0; 
 		ip2bus_mstwr_req <= 0; 
 		ip2bus_mst_addr  <= 0;
@@ -255,31 +276,26 @@ always @(posedge Clk)
 	else begin 
 		case ( axiFSM_currentState )
 		`AXI_FSM_IDLE : begin 
-			if ( (mainFSM_currentState == `FSM_RECEIEVE_BLOCK_BRAM1) && (mainFSM_prevState == `FSM_IDLE) ) begin 
-				axiFSM_currentState <= `AXI_FSM_SEND_READ_REQUEST1; 
+			if ( (mainFSM_currentState == `FSM_SEND_ONE_FULL_BIN) && (mainFSM_prevState == `FSM_COMPUTE_BINS_BLOCK) ) begin 
+				axiFSM_currentState <= `AXI_FSM_SEND_WRITE_REQUEST1; 
 				axiFSM_prevState <= `AXI_FSM_IDLE; 
-				
-				axiFSM_readRequestCounter <= 0; 
+				ip2bus_mst_length <= 512; //as one full bin
+				axiFSM_writeRequestCounter <= 0; 
 			end 
-			else if ( (mainFSM_currentState == `FSM_RECEIEVE_BLOCK_BRAM1) && (mainFSM_prevState == `FSM_SEND_BLOCK_BRAM2) ) begin 
-				axiFSM_currentState <= `AXI_FSM_SEND_READ_REQUEST1; 
+			else if ( (mainFSM_currentState == `FSM_SEND_ALL_BINS) && (mainFSM_prevState == `FSM_COMPUTE_BINS_BLOCK) ) begin 
+				
+				axiFSM_currentState <= `AXI_FSM_SEND_WRITE_REQUEST1; 
 				axiFSM_prevState <= `AXI_FSM_IDLE; 
-				
-				axiFSM_readRequestCounter <= 0; 
+				//set ip2bus_mst_length = counter arrays - for all bins
+				axiFSM_writeRequestCounter <= 0; 
 			end 
-			else if ( (mainFSM_currentState == `FSM_SEND_BLOCK_BRAM2) && (mainFSM_prevState == `FSM_COMPUTE_BLOCK) ) begin 
+			else if ( (mainFSM_currentState == `REBINNING) && (mainFSM_prevState == `FSM_COMPUTE_BINS_BLOCK) ) begin ///Set vars to control 
 				axiFSM_currentState <= `AXI_FSM_SEND_WRITE_REQUEST1; 
 				axiFSM_prevState <= `AXI_FSM_IDLE; 
 				
 				axiFSM_writeRequestCounter <= 0; 
 			end
-            else if ( (mainFSM_currentState == `FSM_COMPUTE_BLOCK) && (mainFSM_prevState == `FSM_RECEIEVE_BLOCK_BRAM1) ) begin 
-				axiFSM_currentState <= `AXI_FSM_DATA_TRANSFER; 
-				axiFSM_prevState <= `AXI_FSM_IDLE; 
-				
-				axistream_data_send_count <= 0; 
-				axistream_data_receive_count <= 0; 
-			end 
+            
 			else begin 
 
 				axiFSM_currentState <= `AXI_FSM_IDLE; 
@@ -287,7 +303,7 @@ always @(posedge Clk)
 			end 
 			
 			axiMaster_blockReceived_to_BRAM1 <= 0; 
-			axiMaster_blockSent_to_BRAM2 <= 0; 
+			axiMaster_binSent_to_DRAM <= 0; 
 		end 
 		/////////////////////////////////
 		// 
@@ -296,7 +312,7 @@ always @(posedge Clk)
 		/////////////////////////////////
 		`AXI_FSM_SEND_READ_REQUEST1: begin 
 			ip2bus_mstrd_req <= 1; 
-			ip2bus_mst_addr <= inputImageAddressR + axi_readAddress_offset*4;
+			ip2bus_mst_addr <= //bin address
 			
 			axiFSM_currentState <= `AXI_FSM_WAIT_FOR_READ_ACK1; 
 			axiFSM_prevState <= `AXI_FSM_SEND_READ_REQUEST1; 
@@ -317,6 +333,7 @@ always @(posedge Clk)
 			end 
 		end 
 		`AXI_FSM_WAIT_FOR_READ_CMPLT1: begin 
+		
 			if ( bus2ip_mst_cmplt ) begin 
 			
 				if ( axiFSM_readRequestCounter == (`Num_of_Beats - 1) ) begin 
@@ -337,58 +354,7 @@ always @(posedge Clk)
 				axiFSM_prevState <= `AXI_FSM_WAIT_FOR_READ_CMPLT1; 
 			end 
 		end 
- 
-                /////////////////////////////////
-                //
-                //  transfer data to/from stream interface
-                ////////////////////////////////
-                `AXI_FSM_DATA_TRANSFER: begin
-                        axis_master_valid <= 1;
-                        axis_slave_ready  <= 1; 
-                        //if (axistream_data_receive_count == (`NumofpixelsperBlock - 1) ) hack to make it work need to change back to original
-                        if (axistream_data_receive_count == (`NumofpixelsperBlock) )
-                        begin                            
-			                    axiFSM_currentState          	<= `AXI_FSM_IDLE; 
-			                    axiFSM_prevState             	<= `AXI_FSM_DATA_TRANSFER;
-                                axis_slave_ready              	<= 0;                           	
-                                ComputeDone                  	<= 1'b1;
-                                axistream_data_receive_count    <= 0;
-                                axistream_data_send_count       <= 0;
-                        end
-                        else 
-                        begin
-                               axis_slave_ready  <= 1;
-			                   axiFSM_currentState            <= `AXI_FSM_DATA_TRANSFER; 
-			                   axiFSM_prevState               <= `AXI_FSM_DATA_TRANSFER;
-                                if (axis_slave_valid)
-				                begin
-                                	axistream_data_receive_count   <= axistream_data_receive_count +1;
-				                end
-                                else
-				                begin
-                                	axistream_data_receive_count   <= axistream_data_receive_count;
-				                end                                 
-                        end    
-                        
-                        
-                                                     
-                        if ( axistream_data_send_count == (`NumofpixelsperBlock + 2) )
-                        begin
-                                axis_master_valid               <= 0;
-				                //axistream_data_send_count       <= 0;     
-                        end
-			            else
-			            begin
-                                if(axis_master_valid)
-                                begin  
-					            axistream_data_send_count      <= axistream_data_send_count + 1;
-				                end
-                                else
-				                begin
-                                axistream_data_send_count      <= axistream_data_send_count;
-				                end	
-                        end
-                 end
+		
 		/////////////////////////////////
 		// 
 		// write req. 1 
@@ -396,8 +362,8 @@ always @(posedge Clk)
 		/////////////////////////////////
 		`AXI_FSM_SEND_WRITE_REQUEST1: begin 
 			ip2bus_mstwr_req    <= 1;
-			ComputeDone         <= 1'b0;
-            ip2bus_mst_addr     <= outputImageAddressR + axi_writeAddress_offset*4;  
+			//ComputeDone         <= 1'b0;
+            ip2bus_mst_addr     <=  //write to appropriate bin address - in case of send one bin/send all bins
 			axiFSM_currentState <= `AXI_FSM_WAIT_FOR_WRITE_ACK1; 
 			axiFSM_prevState    <= `AXI_FSM_SEND_WRITE_REQUEST1; 
 		end 
@@ -414,23 +380,51 @@ always @(posedge Clk)
 			end 	
 		end 
 		`AXI_FSM_WAIT_FOR_WRITE_CMPLT1: begin 
-			if ( bus2ip_mst_cmplt ) begin 
-				if ( axiFSM_writeRequestCounter == (`Num_of_Beats - 1)) begin 
-					axiFSM_currentState     <= `AXI_FSM_IDLE; 
-					axiFSM_prevState        <= `AXI_FSM_WAIT_FOR_READ_CMPLT1; 
-					axiMaster_blockSent_to_BRAM2 <= 1'b1; 
+			if ( onebinfull )
+			begin
+					if ( bus2ip_mst_cmplt ) begin 
+						if ( axiFSM_writeRequestCounter == 2) begin 
+							axiFSM_currentState     <= `AXI_FSM_IDLE; 
+							axiFSM_prevState        <= `AXI_FSM_WAIT_FOR_READ_CMPLT1; 
+							axiMaster_binSent_to_DRAM <= 1'b1; 
+						end 
+						else begin 
+							axiFSM_currentState      <= `AXI_FSM_SEND_WRITE_REQUEST1; 
+							axiFSM_prevState         <= `AXI_FSM_WAIT_FOR_WRITE_CMPLT1;
+							axiFSM_writeRequestCounter <= axiFSM_writeRequestCounter + 1; 
+						end 
+					end 
+					else begin
+						axiFSM_currentState               <= `AXI_FSM_WAIT_FOR_WRITE_CMPLT1;
+						axiFSM_prevState                  <= `AXI_FSM_WAIT_FOR_WRITE_CMPLT1;
+					end 
 				end 
-				else begin 
-					axiFSM_currentState      <= `AXI_FSM_SEND_WRITE_REQUEST1; 
-					axiFSM_prevState         <= `AXI_FSM_WAIT_FOR_WRITE_CMPLT1;
-					axiFSM_writeRequestCounter <= axiFSM_writeRequestCounter + 1; 
+			end
+			else if ( ComputeDone )
+			begin
+					if ( bus2ip_mst_cmplt ) begin 
+						if ( axiFSM_writeRequestCounter == 2) begin 
+							axiFSM_currentState     <= `AXI_FSM_IDLE; 
+							axiFSM_prevState        <= `AXI_FSM_WAIT_FOR_READ_CMPLT1; 
+							axiMaster_binSent_to_DRAM <= 1'b1; 
+						end 
+						else begin 
+							axiFSM_currentState      <= `AXI_FSM_SEND_WRITE_REQUEST1; 
+							axiFSM_prevState         <= `AXI_FSM_WAIT_FOR_WRITE_CMPLT1;
+							axiFSM_writeRequestCounter <= axiFSM_writeRequestCounter + 1; 
+						end 
+					end 
+					else begin
+						axiFSM_currentState               <= `AXI_FSM_WAIT_FOR_WRITE_CMPLT1;
+						axiFSM_prevState                  <= `AXI_FSM_WAIT_FOR_WRITE_CMPLT1;
+					end 
 				end 
-			end 
-			else begin
-				axiFSM_currentState               <= `AXI_FSM_WAIT_FOR_WRITE_CMPLT1;
-				axiFSM_prevState                  <= `AXI_FSM_WAIT_FOR_WRITE_CMPLT1;
-			end 
-		end 
+			end
+			
+			
+			end
+		
+		
 		/////////////////////////////////
 		// 
 		// default
@@ -444,12 +438,6 @@ always @(posedge Clk)
 	end 
 	
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////	
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////	///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////	///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////	///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////	
-
-
-
-
-
 
 ////////////////////////////////////////////////////// 
 // BRAM instantiation
@@ -558,12 +546,9 @@ always @(posedge Clk)
 			pixelbram_writeData_1     <= 0; 
 			pixelbram_writeEnable_1   <= 0;
 		end
-                else if ( pixelbram_writeEnable_1 ) //write conditions for writing
+                else if ( pixelbram_writeEnable_1 ) //write conditions for writing - calculate write address here
                 begin
-                	    //pixelbram_writeAddress_1       <= pixelbram_writeAddress_1 + axistream_data_receive_count;
-                	    //pixelbram_writeEnable_1        <= 1'b1;
-						
-                	    pixelbram_writeAddress_1       <= axistream_data_receive_count;
+						pixelbram_writeAddress_1       <= binNumber*512 + bramCounterArray[binNumber];
                         pixelbram_writeData_1          <= axis_slave_data_in;
                         end
                 else
