@@ -1,3 +1,13 @@
+/*
+Pending:
+Use rebinning Visio drawing to write the rebinning scheme into pixel_bram memory - will do 
+
+Development comments: 
+double check and set mst_addr and mst_length for every read and write request
+see if the pixel_bram memory addresses beiong read correspond to one being written to the DRAM for rebin case
+
+if above two points are good - the design should work as intended
+*/
 `include "comm_defines.sv" 
 
 module bram_controller #
@@ -199,11 +209,17 @@ always @(posedge Clk)
 			end
   
 		   `FSM_SEND_ALL_BINS: begin
-	        //ComputeDone <= 1'b0; // ALSO - REBINNING !!!
  			if ( axiMaster_allBinsSent_to_DRAM ) 
 			begin
-					mainFSM_currentState <= `FSM_REBIN; //Re-binning
+				if ( sendBlockCounter == (NumberOfBlocks-1))
+				begin
+					mainFSM_currentState <= `FSM_REBIN_DOWNLOAD; //Re-binning
 					mainFSM_prevState    <= `FSM_SEND_ALL_BINS;
+				end
+				else begin
+					mainFSM_currentState <= `FSM_RECEIEVE_RAW_WEIGHTS_BRAM1;
+					mainFSM_prevState    <= `FSM_SEND_ALL_BINS
+				end
 			end 
 			else begin
 				mainFSM_currentState <= `FSM_SEND_ALL_BINS;
@@ -211,21 +227,74 @@ always @(posedge Clk)
 			end 
 	      end
 		  
-	      `FSM_END_OPERATION: begin 
+		  
+		`FSM_REBIN_DOWNLOAD: begin
+		if ( axiMaster_rebin_done )
+		begin
+				mainFSM_currentState <= `END_OPERATION; 
+				mainFSM_prevState    <= `FSM_REBIN;
+		end
+		else if ( axiFSM_oneRebinDownloaded )
+		begin
+			mainFSM_currentState <= `FSM_REBIN_UPLOAD;
+			mainFSM_prevState <= `FSM_REBIN_DOWNLOAD;
+		end
+		end
+		
+		`FSM_REBIN_UPLOAD: begin
+		if ( somecounter == number of elements in the bin being uploaded )
+			//change state to download
+		end
+		else begin
+			//stay in the same state
+		end
+		 
+		 
+		 
+		`FSM_END_OPERATION: begin 
 			ComputationDone <= 1; 
 			mainFSM_currentState <= `FSM_IDLE; 
 			mainFSM_prevState    <= `FSM_END_OPERATION; 
 	      end 
-	      default: begin 
+	      
+		  
+		  default: begin 
 			mainFSM_currentState <= `FSM_IDLE; 
 			mainFSM_prevState <= mainFSM_prevState; 
 	      end 
 	      endcase 
        end 
 
-	   
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// send block counters - says which weights block we are operating on
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+reg	[3:0]	sendBlockCounter; 
 
+always @(posedge Clk)
+	if ( ! ResetL ) begin 
+		sendBlockCounter    <= 0;
+	end
+	else begin
+		if ( mainFSM_currentState == `FSM_IDLE ) begin 
+			sendBlockCounter    <= 0;
+		end 
+		else if ( ( mainFSM_currentState == `FSM_RECEIEVE_RAW_WEIGHTS_BRAM1) && (mainFSM_prevState == `FSM_SEND_ALL_BINS) ) 
+		begin 
+				if ( sendBlockCounter == (NumberOfBlocks-1) ) 
+				begin 
+					sendBlockCounter <= sendBlockCounter;
+                end  
+				else 
+				begin 
+					sendBlockCounter <= sendBlockCounter + 1; 
+				end
+  
+		end 
+		else begin 
+			sendBlockCounter    <= sendBlockCounter; 
+		end 
+	end	   
 
 //////////////////////////////////////////////////////
 // axi master - constant signals (fixed value)
@@ -245,9 +314,7 @@ assign ip2bus_mstwr_src_dsc_n = 1;
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // AXI MASTER FSM - ALSO INCLUDES COMPUTE BINS, TRANSFER ONE FULL BIN and TRANSFER ALL BINS
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// logic to talk to the axi master ipif
 
-//reg 			axiMaster_blockReceived_to_BRAM1;
 reg 			axiMaster_binSent_to_DRAM; 
 reg 			ComputeDone; 
 reg	[3:0]		axiFSM_currentState; 
@@ -290,15 +357,22 @@ always @(posedge Clk)
 				axiFSM_writeRequestCounter <= 0; 
 				//set ip2bus_mst_length = counter arrays - for all bins - in wait for cmd ack
 			end 
-			else if ( (mainFSM_currentState == `REBINNING) && (mainFSM_prevState == `FSM_COMPUTE_BINS_BLOCK) ) begin ///Set vars to control 
+			else if ( (mainFSM_currentState == `FSM_REBIN_DOWNLOAD) && (mainFSM_prevState == `FSM_SEND_ALL_BINS) ) begin //rebin - first instance into download
+				axiFSM_currentState <= `AXI_FSM_SEND_READ_REQUEST1; 
+				axiFSM_prevState <= `AXI_FSM_IDLE; 
+				axiFSM_readRequestCounter <= 0; 
+			end
+			else if ( (mainFSM_currentState == `FSM_REBIN_DOWNLOAD) && (mainFSM_prevState == `FSM_REBIN_UPLOAD) ) begin //rebin - get a bin from DRAM
+				axiFSM_currentState <= `AXI_FSM_SEND_READ_REQUEST1; 
+				axiFSM_prevState <= `AXI_FSM_IDLE; 
+				axiFSM_readRequestCounter <= 0; 
+			end
+			else if ( (mainFSM_currentState == `FSM_REBIN_UPLOAD) && (mainFSM_prevState == `FSM_REBIN_DOWNLOAD) ) begin //rebin - put a bin into DRAM
 				axiFSM_currentState <= `AXI_FSM_SEND_WRITE_REQUEST1; 
 				axiFSM_prevState <= `AXI_FSM_IDLE; 
-				
-				axiFSM_writeRequestCounter <= 0; 
+				axiFSM_readRequestCounter <= 0; 
 			end
-            
 			else begin 
-
 				axiFSM_currentState <= `AXI_FSM_IDLE; 
 				axiFSM_prevState <= `AXI_FSM_IDLE; 
 			end 
@@ -315,7 +389,7 @@ always @(posedge Clk)
 		`AXI_FSM_SEND_READ_REQUEST1: begin 
 			ip2bus_mstrd_req <= 1; 
 			ip2bus_mst_addr <= //bin address
-			
+			//ip2bus_mst_length <= dramCounterArray[binNumber] //sequentially incremented according to Num_of_Rebin_Chunks [ip2bus_mst_length*(Num_of_Rebin_Chunks-1)+remainder]=dramCounterArray[binNumber]
 			axiFSM_currentState <= `AXI_FSM_WAIT_FOR_READ_ACK1; 
 			axiFSM_prevState <= `AXI_FSM_SEND_READ_REQUEST1; 
 			
@@ -337,18 +411,26 @@ always @(posedge Clk)
 		`AXI_FSM_WAIT_FOR_READ_CMPLT1: begin 
 		
 			if ( bus2ip_mst_cmplt ) begin 
-			
-				if ( axiFSM_readRequestCounter == (`Num_of_Beats - 1) ) begin 
+				if ( axiFSM_readRequestCounter < `Num_of_Rebins-1 )
+				begin
+					if ( internalReadReqCounter == (`Num_of_Rebin_Chunks - 1) ) //internal read req counter keeps track of how many read req need to be sent for a single bin in dram (as it may have more than 256
+					begin 
+						axiFSM_currentState <= `AXI_FSM_IDLE; //should go to write request by seeing axiFSM_oneRebinDownloaded
+						axiFSM_prevState <= `AXI_FSM_WAIT_FOR_READ_CMPLT1; 
+						axiFSM_oneRebinDownloaded <= 1'b1;
+					end 
+					else begin
+						axiFSM_currentState <= `AXI_FSM_SEND_READ_REQUEST1; 
+						axiFSM_prevState <= `AXI_FSM_WAIT_FOR_READ_CMPLT1; 
+						internalReadReqCounter <= internalReadReqCounter + 1;
+						//set appropriate mst_length
+					end
+				end
+				else if ( axiFSM_readRequestCounter == `Num_of_Rebins - 1 ) 
+				begin 	
 					axiFSM_currentState <= `AXI_FSM_IDLE; 
 					axiFSM_prevState <= `AXI_FSM_WAIT_FOR_READ_CMPLT1; 
-					axiMaster_blockReceived_to_BRAM1 <= 1'b1;
-				end 
-				else begin 	
-					axiFSM_currentState <= `AXI_FSM_SEND_READ_REQUEST1; 
-					axiFSM_prevState <= `AXI_FSM_WAIT_FOR_READ_CMPLT1; 
-					
-					axiMaster_blockReceived_to_BRAM1 <= 0; 
-					axiFSM_readRequestCounter <= axiFSM_readRequestCounter + 1; 
+					axiMaster_rebin_done <= 1'b1;
 				end 
 			end 
 			else begin 
@@ -719,6 +801,4 @@ always @(posedge Clk)
 // write start of frame and end of frame and data 
 //////////////////////////////////////////////////////////////////////////////////////////
 
-assign ip2bus_mstwr_d = pixelbram_readData_1;	
-	
-	
+assign ip2bus_mstwr_d = pixelbram_readData_1;
